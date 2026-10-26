@@ -1,6 +1,5 @@
 from datetime import date, timedelta
-
-from django.db.models import Model
+from decimal import Decimal
 from django.utils import timezone
 
 import django_filters
@@ -215,18 +214,13 @@ class MembershipViewSet(
         ),
         parameters=[
             OpenApiParameter(
-                name="from",
-                description="Freeze start date (YYYY-MM-DD)",
-                required=False,
-                type=str
-            ),
-            OpenApiParameter(
                 name="to",
                 description="Freeze end date (YYYY-MM-DD)",
                 required=False,
                 type=str
             ),
         ],
+        request=None,
         responses={
             200: MembershipSerializer,
             400: OpenApiResponse(
@@ -241,7 +235,6 @@ class MembershipViewSet(
     def freeze(self, request, pk=None):
         """Process freeze action on an active membership."""
         membership = Membership.objects.get(pk=pk)
-
         if membership.status != Membership.Status.ACTIVE:
             return Response(
                 {"error": "Only active memberships can be frozen."},
@@ -249,6 +242,7 @@ class MembershipViewSet(
             )
 
         if membership.was_frozen:
+            print("was frozen")
             return Response(
                 {
                     "error": (
@@ -259,28 +253,15 @@ class MembershipViewSet(
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        frozen_from = request.query_params.get("from") or request.data.get("frozen_from")
-        frozen_to = request.query_params.get("to") or request.data.get("frozen_to")
+        frozen_from = timezone.localdate()
+        frozen_to_str = request.query_params.get("to") or request.data.get("frozen_to")
 
         serializer = MembershipFreezeSerializer(
-            data={"frozen_from": frozen_from, "frozen_to": frozen_to}
+            data={"frozen_from": frozen_from, "frozen_to": frozen_to_str}
         )
         serializer.is_valid(raise_exception=True)
 
-        frozen_from = serializer.validated_data["frozen_from"]
         frozen_to = serializer.validated_data["frozen_to"]
-
-        today = timezone.localdate()
-
-        if frozen_from != today:
-            return Response(
-                {
-                    "error": (
-                        "Freeze must start on the current date."
-                    )
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
 
         if not (membership.start_date <= frozen_from <= membership.end_date):
             return Response(
@@ -332,8 +313,6 @@ class MembershipViewSet(
 
         notify_membership_frozen(membership)
 
-        notify_membership_frozen(membership)
-
         return Response(
             MembershipSerializer(membership).data,
             status=status.HTTP_200_OK,
@@ -345,6 +324,7 @@ class MembershipViewSet(
             "Unfreezes a currently frozen membership and sets its status "
             "back to ACTIVE."
         ),
+        request=None,
         responses={
             200: MembershipSerializer,
             400: OpenApiResponse(
@@ -355,7 +335,7 @@ class MembershipViewSet(
     @action(detail=True, methods=["post"])
     def resume(self, request, pk=None):
         """Process resume action on a frozen membership."""
-        membership = self.get_object()
+        membership = Membership.objects.get(pk=pk)
 
         if membership.status != Membership.Status.FROZEN:
             return Response(
@@ -374,9 +354,39 @@ class MembershipViewSet(
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        today = date.today()
+
+        if membership.frozen_from and membership.frozen_to and today < membership.frozen_to:
+            actual_freeze_start = max(membership.frozen_from, today)
+            unused_days = (membership.frozen_to - actual_freeze_start).days
+            if unused_days > 0:
+                membership.end_date -= timedelta(days=unused_days)
+
+                if membership.auto_renew:
+                    try:
+                        PaymentService().update_subscription_trial_end(
+                            membership=membership,
+                            new_billing_date=membership.end_date,
+                        )
+                    except ValueError as error:
+                        return Response(
+                            {"error": str(error)},
+                            status=status.HTTP_409_CONFLICT,
+                        )
+                    except StripeError:
+                        return Response(
+                            {
+                                "error": (
+                                    "The Stripe billing date could not be updated. "
+                                    "The membership was not resumed."
+                                )
+                            },
+                            status=status.HTTP_502_BAD_GATEWAY,
+                        )
+
         membership.status = Membership.Status.ACTIVE
         membership.save(
-            update_fields=["status"]
+            update_fields=["status", "frozen_from", "frozen_to", "end_date"]
         )
 
         return Response(
@@ -387,9 +397,10 @@ class MembershipViewSet(
     @extend_schema(
         summary="Create a membership upgrade payment",
         description=(
-            "Creates a Stripe Checkout session for upgrading "
-            "the membership to a more expensive plan."
+                "Creates a Stripe Checkout session for upgrading "
+                "the membership to a more expensive plan."
         ),
+        request=None,
         parameters=[
             OpenApiParameter(name="plan_id", description="New plan ID", required=False, type=int),
         ],
@@ -474,16 +485,14 @@ class MembershipViewSet(
             (membership.end_date - today).days,
         )
 
-        current_daily_rate = (
-            membership.plan.price / membership.plan.duration_days
-        )
-        new_daily_rate = (
-            new_plan.price / new_plan.duration_days
-        )
+        current_duration = max(1, membership.plan.duration_days)
+        new_duration = max(1, new_plan.duration_days)
 
-        upgrade_fee = (
-            new_daily_rate - current_daily_rate
-        ) * remaining_days
+        current_daily_rate = Decimal(membership.plan.price) / Decimal(current_duration)
+        new_daily_rate = Decimal(new_plan.price) / Decimal(new_duration)
+
+        upgrade_fee = (new_daily_rate - current_daily_rate) * Decimal(remaining_days)
+        upgrade_fee = upgrade_fee.quantize(Decimal("0.01"))
 
         if upgrade_fee <= 0:
             return Response(
