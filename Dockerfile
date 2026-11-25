@@ -11,12 +11,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-RUN mkdir -p /vol/web/media /vol/web/static && \
-    adduser \
-        --disabled-password \
-        --no-create-home \
-        django-user && \
-    chown -R django-user:django-user /vol/ && \
-    chmod -R 755 /vol/web/
+RUN adduser --disabled-password django-user
 
 USER django-user
+
+EXPOSE 8000
+CMD ["gunicorn", "config.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "3", "--access-logfile", "-"]

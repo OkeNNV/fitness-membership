@@ -19,3 +19,4 @@ requests
 stripe==16.0.0
 aiogram
 celery-types
+gunicorn>=23.0

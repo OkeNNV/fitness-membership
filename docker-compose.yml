@@ -7,17 +7,13 @@ services:
     env_file:
       - .env
     environment: &app-env
-      MEDIA_ROOT: /vol/web/media
       DB_HOST: db
       DB_PORT: 5432
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
     volumes:
       - ./:/app
-      - my_media:/vol/web/media
-    command: >
-      sh -c "python manage.py migrate &&
-             python manage.py runserver 0.0.0.0:8000"
+    command: sh -c "python manage.py migrate && gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 3 --access-logfile -"
     depends_on:
       db:
         condition: service_healthy
@@ -95,5 +91,4 @@ services:
 
 volumes:
   my_db:
-  my_media:
   my_redis:
