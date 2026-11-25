@@ -13,6 +13,7 @@ from drf_spectacular.utils import (
 )
 from rest_framework import filters, mixins, permissions, status, viewsets
 from rest_framework.decorators import action
+from rest_framework.generics import get_object_or_404
 from rest_framework.response import Response
 from stripe import StripeError
 
@@ -234,7 +235,12 @@ class MembershipViewSet(
     @action(detail=True, methods=["post"])
     def freeze(self, request, pk=None):
         """Process freeze action on an active membership."""
-        membership = Membership.objects.get(pk=pk)
+        membership = get_object_or_404(Membership, pk=pk)
+        if not request.user.is_staff and membership.member != request.user:
+            return Response(
+                {"error": "You do not have permission to modify this membership."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         if membership.status != Membership.Status.ACTIVE:
             return Response(
                 {"error": "Only active memberships can be frozen."},
@@ -334,7 +340,12 @@ class MembershipViewSet(
     @action(detail=True, methods=["post"])
     def resume(self, request, pk=None):
         """Process resume action on a frozen membership."""
-        membership = Membership.objects.get(pk=pk)
+        membership = get_object_or_404(Membership, pk=pk)
+        if not request.user.is_staff and membership.member != request.user:
+            return Response(
+                {"error": "You do not have permission to modify this membership."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
         if membership.status != Membership.Status.FROZEN:
             return Response(
